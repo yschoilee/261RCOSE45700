@@ -11,7 +11,12 @@ Stage 6: Map initial slider values
 import json
 from pathlib import Path
 
-from .feature_extractor import extract_features
+from .feature_extractor import (
+    CORE_FEATURE_FIELDS,
+    EXTENDED_FEATURE_FIELDS,
+    FEATURE_SCHEMA_VERSION,
+    extract_features,
+)
 from .renderer import render_multiview
 from .template_selector import select_template
 from .varco_client import get_client
@@ -41,6 +46,9 @@ def run_pipeline(
             "status": "ok",
             "glb_path": str,
             "renders": {view_name: image_path},
+            "feature_schema_version": str,
+            "core_feature_fields": [...],
+            "extended_feature_fields": [...],
             "feature_vector": {...},
             "feature_source": "original" | "front_render",
             "feature_debug": {...},
@@ -58,6 +66,9 @@ def run_pipeline(
             "error": str,
             "glb_path": str,
             "renders": {view_name: image_path},
+            "feature_schema_version": str,
+            "core_feature_fields": [...],
+            "extended_feature_fields": [...],
             "feature_vector": None,
             "feature_source": None,
             "feature_debug": {...},
@@ -84,6 +95,9 @@ def run_pipeline(
             "error": str(exc),
             "glb_path": glb_path,
             "renders": render_paths,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "core_feature_fields": CORE_FEATURE_FIELDS,
+            "extended_feature_fields": EXTENDED_FEATURE_FIELDS,
             "feature_vector": None,
             "feature_source": None,
             "feature_debug": exc.feature_debug,
@@ -115,7 +129,10 @@ def run_pipeline(
         "status": "ok",
         "glb_path": glb_path,
         "renders": render_paths,
-        "feature_vector": fv.to_dict(),
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "core_feature_fields": CORE_FEATURE_FIELDS,
+        "extended_feature_fields": EXTENDED_FEATURE_FIELDS,
+        "feature_vector": fv.to_dict(include_extended=True),
         "feature_source": feature_source,
         "feature_debug": feature_debug,
         "avatar_parameters": avatar_parameters,

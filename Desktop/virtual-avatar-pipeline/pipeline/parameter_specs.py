@@ -75,7 +75,10 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "Eye_Rot": _spec(
         value_range=(-1.0, 1.0),
         domain="eye",
-        description="Eye rotation adjustment.",
+        source="FaceFeatureVector",
+        feature="eye_slant",
+        enabled=True,
+        description="Experimental eye rotation adjustment based on eye slant.",
     ),
     "Eye_FrontHeight": _spec(
         value_range=(-1.0, 1.0),
@@ -90,7 +93,10 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "Eye_TailHeight": _spec(
         value_range=(-1.0, 1.0),
         domain="eye",
-        description="Outer eye tail height adjustment.",
+        source="FaceFeatureVector",
+        feature="eye_tail_height_delta",
+        enabled=True,
+        description="Experimental outer eye tail height adjustment based on eye tail delta.",
     ),
     "Eye_TopLidFlat": _spec(
         value_range=(0.0, 1.0),
@@ -179,25 +185,34 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "Mouth_Height": _spec(
         value_range=(-1.0, 1.0),
         domain="mouth",
-        description="Mouth height adjustment.",
+        source="FaceFeatureVector",
+        feature="mouth_center_y_ratio",
+        enabled=True,
+        description="Experimental mouth height adjustment based on mouth center position.",
     ),
     "Mouth_Corner": _spec(
         value_range=(-1.0, 1.0),
         domain="mouth",
-        description="Mouth corner adjustment.",
+        source="FaceFeatureVector",
+        feature="smile_score_geometry",
+        enabled=True,
+        description="Experimental mouth corner adjustment based on smile geometry.",
     ),
     "Face_JawLine": _spec(
         value_range=(0.0, 1.0),
         domain="face",
         source="FaceFeatureVector",
-        feature="jaw_width_ratio",
+        feature="jaw_sharpness_score",
         enabled=True,
-        description="Jawline strength based on normalized jaw width.",
+        description="Jawline strength based on diagnostic jaw sharpness.",
     ),
     "Face_Cheek": _spec(
         value_range=(0.0, 1.0),
         domain="face",
-        description="Cheek shape strength.",
+        source="FaceFeatureVector",
+        feature="cheek_jaw_delta_ratio",
+        enabled=True,
+        description="Cheek shape strength based on cheek-jaw width delta.",
     ),
     "Face_Roundness": _spec(
         value_range=(0.0, 1.0),
@@ -211,9 +226,9 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
         value_range=(0.0, 1.0),
         domain="face",
         source="FaceFeatureVector",
-        feature="jaw_width_ratio",
+        feature="chin_width_ratio",
         enabled=True,
-        description="Chin width strength based on normalized jaw width.",
+        description="Chin width strength based on diagnostic chin width.",
     ),
 }
 

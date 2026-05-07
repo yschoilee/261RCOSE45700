@@ -2,19 +2,28 @@
 Virtual Avatar Pipeline CLI (Stage 2-6)
 
 Examples:
-    python main.py run --image face.jpg --api-key YOUR_API_KEY
-    python main.py run --image samples/01_input --api-key YOUR_API_KEY
+    python main.py run --image face.jpg
+    python main.py run --image samples/01_input
     python main.py extract --image face.jpg
     python main.py run --image face.jpg --skip-3d --glb ./output/avatar.glb
     python main.py debug --image face.jpg
     python main.py batch --images samples --save-json output/batch.json
+
+API Key Configuration:
+    Set VARCO_API_KEY or MESHY_API_KEY environment variable,
+    or create a .env file in the project root:
+        VARCO_API_KEY=your_varco_key
+        MESHY_API_KEY=your_meshy_key
 """
 
 import argparse
 import csv
 import json
+import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 from pipeline import (
     FaceFeatureVector,
@@ -57,7 +66,10 @@ def cmd_extract(args):
 
     print("[Extract] feature vector:")
     for key, value in feature_vector.to_dict().items():
-        print(f"  {key}: {value:.4f}")
+        if value is None:
+            print(f"  {key}: null")
+        else:
+            print(f"  {key}: {value:.4f}")
 
     from pipeline import select_template
 
@@ -327,6 +339,9 @@ def _resolve_image_args(image_args: list[str]) -> list[str]:
 
 
 def main():
+    # Load environment variables from .env file
+    load_dotenv()
+    
     parser = argparse.ArgumentParser(description="Virtual Avatar Pipeline")
     parser.add_argument("--output", default="./output", help="output directory")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -355,6 +370,11 @@ def main():
     p_dbg.add_argument("--image", required=True, help="image path or sample input directory")
 
     args = parser.parse_args()
+    
+    # Resolve API key: CLI arg > environment variable
+    if hasattr(args, "api_key"):
+        api_key = args.api_key or os.getenv("VARCO_API_KEY") or os.getenv("MESHY_API_KEY") or ""
+        args.api_key = api_key
 
     if args.command == "run":
         cmd_run(args)

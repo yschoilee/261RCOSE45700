@@ -20,9 +20,16 @@ FEATURE_CALIBRATION: dict[str, dict[str, float]] = {
     "nose_height_ratio": {"ref": 0.28, "half_range": 0.15},
     "nose_width_ratio": {"ref": 0.26, "half_range": 0.12},
     "mouth_width_ratio": {"ref": 0.35, "half_range": 0.20},
+    "smile_score_geometry": {"ref": 0.0, "half_range": 0.05},
+    "mouth_center_y_ratio": {"ref": 0.78, "half_range": 0.10},
+    "eye_slant": {"ref": 0.08, "half_range": 0.10},
+    "eye_tail_height_delta": {"ref": 0.015, "half_range": 0.03},
     "jaw_width_ratio": {"ref": 0.70, "half_range": 0.15},
     "forehead_ratio": {"ref": 0.50, "half_range": 0.15},
     "chin_ratio": {"ref": 0.32, "half_range": 0.12},
+    "chin_width_ratio": {"ref": 0.18, "half_range": 0.10},
+    "cheek_jaw_delta_ratio": {"ref": 0.25, "half_range": 0.15},
+    "jaw_sharpness_score": {"ref": 0.35, "half_range": 0.25},
 }
 
 
