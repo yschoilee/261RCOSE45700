@@ -1,22 +1,32 @@
 """
-이미지 → 3D 아바타 생성 파이프라인 오케스트레이터 (Stage 2-6)
+Image -> 3D avatar generation pipeline orchestration (Stage 2-6).
 
-Stage 2: VARCO/Meshy API → GLB
-Stage 3: GLB → 멀티뷰 렌더 (front/left/right/quarter)
-Stage 4: MediaPipe 특징 추출
-         - 원본 입력 이미지 우선 (렌더된 3D 이미지보다 안정적)
-         - 실패 시 rendered front view로 폴백
-Stage 5: cute/slim/mature 템플릿 자동 선택
-Stage 6: 슬라이더 초기값 매핑
+Stage 2: Generate GLB with VARCO/Meshy API
+Stage 3: Render GLB multi-view images (front/left/right/quarter)
+Stage 4: Extract facial features with front-render priority and original-image fallback
+Stage 5: Select cute/slim/mature template
+Stage 6: Map initial slider values
 """
 
 import json
 from pathlib import Path
 
-from .varco_client import get_client
+from .feature_extractor import (
+    CORE_FEATURE_FIELDS,
+    EXTENDED_FEATURE_FIELDS,
+    FEATURE_SCHEMA_VERSION,
+    extract_features,
+)
 from .renderer import render_multiview
-from .feature_extractor import extract_features
 from .template_selector import select_template
+from .varco_client import get_client
+from .parameter_mapper import map_avatar_parameters
+
+
+class Stage4ExtractionError(RuntimeError):
+    def __init__(self, message: str, feature_debug: dict):
+        super().__init__(message)
+        self.feature_debug = feature_debug
 
 
 def run_pipeline(
@@ -28,56 +38,105 @@ def run_pipeline(
     existing_glb: str | None = None,
 ) -> dict:
     """
-    이미지 → 특징 벡터 + 템플릿 선택까지 전체 파이프라인 실행.
-
-    Args:
-        image_path:   원본 입력 이미지 경로 (NSFW 필터는 호출 전 처리 가정)
-        output_dir:   결과물 저장 디렉토리
-        provider:     "meshy" | "varco"
-        api_key:      API 키
-        skip_3d:      True면 GLB 생성 건너뜀 (기존 GLB 재사용 시)
-        existing_glb: skip_3d=True일 때 사용할 GLB 경로
+    Run the full pipeline from image input to template selection.
 
     Returns:
-        {
-          "glb_path": str,
-          "renders": {view_name: image_path},
-          "feature_vector": {...},
-          "feature_source": "original" | "front_render",
-          "template": str,
-          "confidence": float,
-          "all_scores": {...},
-          "slider_init": {...},
-        }
+        Success ("status" == "ok"):
+          {
+            "status": "ok",
+            "glb_path": str,
+            "renders": {view_name: image_path},
+            "feature_schema_version": str,
+            "core_feature_fields": [...],
+            "extended_feature_fields": [...],
+            "feature_vector": {...},
+            "feature_source": "original" | "front_render",
+            "feature_debug": {...},
+            "avatar_parameters": {...},
+            "parameter_debug": {...},
+            "template": str,
+            "confidence": float,
+            "all_scores": {...},
+            "slider_init": {...},
+          }
+
+        Stage 4 failure ("status" == "failed_stage4"):
+          {
+            "status": "failed_stage4",
+            "error": str,
+            "glb_path": str,
+            "renders": {view_name: image_path},
+            "feature_schema_version": str,
+            "core_feature_fields": [...],
+            "extended_feature_fields": [...],
+            "feature_vector": None,
+            "feature_source": None,
+            "feature_debug": {...},
+            "avatar_parameters": None,
+            "parameter_debug": None,
+            "template": None,
+            "confidence": None,
+            "all_scores": None,
+            "slider_init": None,
+          }
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # ── Stage 2: GLB 생성 ────────────────────────────────────────────────────
     glb_path = _stage2_generate_glb(
         image_path, out, provider, api_key, skip_3d, existing_glb
     )
-
-    # ── Stage 3: 멀티뷰 렌더 ────────────────────────────────────────────────
     renders, render_paths = _stage3_render(glb_path, out)
+    try:
+        fv, feature_source, feature_debug = _stage4_extract(image_path, renders)
+    except Stage4ExtractionError as exc:
+        output = {
+            "status": "failed_stage4",
+            "error": str(exc),
+            "glb_path": glb_path,
+            "renders": render_paths,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "core_feature_fields": CORE_FEATURE_FIELDS,
+            "extended_feature_fields": EXTENDED_FEATURE_FIELDS,
+            "feature_vector": None,
+            "feature_source": None,
+            "feature_debug": exc.feature_debug,
+            "avatar_parameters": None,
+            "parameter_debug": None,
+            "template": None,
+            "confidence": None,
+            "all_scores": None,
+            "slider_init": None,
+        }
+        result_path = out / "pipeline_result.json"
+        result_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
+        print(f"[Pipeline] result saved: {result_path}")
+        return output
 
-    # ── Stage 4: 특징 추출 ───────────────────────────────────────────────────
-    fv, feature_source = _stage4_extract(image_path, renders)
-
-    # ── Stage 5-6: 템플릿 선택 + 슬라이더 초기화 ────────────────────────────
     result = select_template(fv)
+    avatar_parameters, parameter_debug = map_avatar_parameters(
+        fv,
+        template_name=result.template_name,
+    )
     print(
-        f"[Stage 5] 템플릿: {result.template_name}  "
-        f"confidence={result.confidence:.3f}  "
+        f"[Stage 5] template={result.template_name} "
+        f"confidence={result.confidence:.3f} "
         f"scores={result.all_scores}"
     )
-    print(f"[Stage 6] 슬라이더 초기값: {result.slider_init}")
+    print(f"[Stage 6] slider init={result.slider_init}")
 
     output = {
+        "status": "ok",
         "glb_path": glb_path,
         "renders": render_paths,
-        "feature_vector": fv.to_dict(),
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "core_feature_fields": CORE_FEATURE_FIELDS,
+        "extended_feature_fields": EXTENDED_FEATURE_FIELDS,
+        "feature_vector": fv.to_dict(include_extended=True),
         "feature_source": feature_source,
+        "feature_debug": feature_debug,
+        "avatar_parameters": avatar_parameters,
+        "parameter_debug": parameter_debug,
         "template": result.template_name,
         "confidence": result.confidence,
         "all_scores": result.all_scores,
@@ -86,14 +145,10 @@ def run_pipeline(
 
     result_path = out / "pipeline_result.json"
     result_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
-    print(f"[Pipeline] 결과 저장됨: {result_path}")
+    print(f"[Pipeline] result saved: {result_path}")
 
     return output
 
-
-# ---------------------------------------------------------------------------
-# Stage helpers
-# ---------------------------------------------------------------------------
 
 def _stage2_generate_glb(
     image_path: str,
@@ -106,39 +161,123 @@ def _stage2_generate_glb(
     if skip_3d:
         path = existing_glb or str(out / "avatar.glb")
         if not Path(path).exists():
-            raise FileNotFoundError(f"GLB 파일을 찾을 수 없습니다: {path}")
-        print(f"[Stage 2] 기존 GLB 사용: {path}")
+            raise FileNotFoundError(f"GLB file not found: {path}")
+        print(f"[Stage 2] using existing GLB: {path}")
         return path
 
-    print(f"[Stage 2] GLB 생성 중... (provider={provider})")
+    print(f"[Stage 2] generating GLB... (provider={provider})")
     client = get_client(provider, api_key)
     glb_path = str(out / "avatar.glb")
     client.image_to_3d(image_path, glb_path)
-    print(f"[Stage 2] GLB 저장됨: {glb_path}")
+    print(f"[Stage 2] GLB saved: {glb_path}")
     return glb_path
 
 
 def _stage3_render(glb_path: str, out: Path) -> tuple[dict, dict]:
-    print("[Stage 3] 멀티뷰 렌더 중...")
+    print("[Stage 3] rendering multiview images...")
     render_dir = str(out / "renders")
     renders = render_multiview(glb_path, render_dir)
     render_paths = {k: str(Path(render_dir) / f"{k}.png") for k in renders}
-    print(f"[Stage 3] 렌더 완료: {list(render_paths.keys())}")
+    print(f"[Stage 3] render complete: {list(render_paths.keys())}")
     return renders, render_paths
 
 
 def _stage4_extract(image_path: str, renders: dict) -> tuple:
     """
-    Stage 3 렌더 이미지(front view) → MediaPipe 특징 추출.
-    PRD 흐름: GLB 렌더 → MediaPipe (Stage 4)
+    Try front render first, then fall back to the original image.
     """
-    print("[Stage 4] 특징 추출 중 (front render)...")
-    fv = extract_features(renders["front"])
-    if fv is not None:
-        print(f"[Stage 4] 추출 성공: {fv.to_dict()}")
-        return fv, "front_render"
+    print("[Stage 4] feature extraction (prefer front render, fallback to original)...")
 
-    raise RuntimeError(
-        "front render에서 얼굴을 감지하지 못했습니다. "
-        "VARCO 렌더 결과를 확인하거나 renderer.py의 RESOLUTION을 높여 주세요."
+    feature_debug = {
+        "original": None,
+        "front_render": None,
+        "selected": None,
+        "failures": [],
+        "attempts": {
+            "front_render": [],
+            "original": [],
+        },
+    }
+    confidence_levels = (0.4, 0.3)
+
+    front_render = renders.get("front")
+    if front_render is None:
+        feature_debug["failures"].append({
+            "source": "front_render",
+            "error": "front render missing",
+        })
+    else:
+        for min_confidence in confidence_levels:
+            try:
+                feature_vector = extract_features(
+                    front_render,
+                    min_confidence=min_confidence,
+                )
+                if feature_vector is None:
+                    raise ValueError("face not detected")
+
+                feature_debug["attempts"]["front_render"].append({
+                    "min_confidence": min_confidence,
+                    "success": True,
+                })
+                feature_debug["front_render"] = feature_vector.to_dict()
+                feature_debug["selected"] = "front_render"
+                print(
+                    "[Stage 4] front_render extracted "
+                    f"(min_confidence={min_confidence}): {feature_vector.to_dict()}"
+                )
+                return feature_vector, "front_render", feature_debug
+            except Exception as exc:
+                error_message = str(exc) or exc.__class__.__name__
+                attempt_error = f"min_confidence={min_confidence}: {error_message}"
+                feature_debug["attempts"]["front_render"].append({
+                    "min_confidence": min_confidence,
+                    "success": False,
+                    "error": error_message,
+                })
+                feature_debug["failures"].append(
+                    {"source": "front_render", "error": attempt_error}
+                )
+                print(f"[Stage 4] front_render failed: {attempt_error}")
+
+    for min_confidence in confidence_levels:
+        try:
+            feature_vector = extract_features(
+                image_path,
+                min_confidence=min_confidence,
+            )
+            if feature_vector is None:
+                raise ValueError("face not detected")
+
+            feature_debug["attempts"]["original"].append({
+                "min_confidence": min_confidence,
+                "success": True,
+            })
+            feature_debug["original"] = feature_vector.to_dict()
+            feature_debug["selected"] = "original"
+            print(
+                "[Stage 4] original extracted "
+                f"(min_confidence={min_confidence}): {feature_vector.to_dict()}"
+            )
+            return feature_vector, "original", feature_debug
+        except Exception as exc:
+            error_message = str(exc) or exc.__class__.__name__
+            attempt_error = f"min_confidence={min_confidence}: {error_message}"
+            feature_debug["attempts"]["original"].append({
+                "min_confidence": min_confidence,
+                "success": False,
+                "error": error_message,
+            })
+            feature_debug["failures"].append(
+                {"source": "original", "error": attempt_error}
+            )
+            print(f"[Stage 4] original failed: {attempt_error}")
+
+    failure_text = ", ".join(
+        f"{item['source']}: {item['error']}" for item in feature_debug["failures"]
+    ) or "no failure details"
+    raise Stage4ExtractionError(
+        "Stage 4 feature extraction failed for both original and front_render. "
+        f"Details: {failure_text}",
+        feature_debug,
     )

@@ -1,172 +1,380 @@
 """
 Virtual Avatar Pipeline CLI (Stage 2-6)
 
-사용법:
-    # 전체 파이프라인 (이미지 → GLB → 렌더 → 특징 추출 → 템플릿 선택)
-    python main.py run --image face.jpg --api-key YOUR_MESHY_KEY
-
-    # 특징 추출만 (기존 이미지 대상, API 키 불필요)
+Examples:
+    python main.py run --image face.jpg
+    python main.py run --image samples/01_input
     python main.py extract --image face.jpg
-
-    # 기존 GLB 재사용 (3D 생성 스킵)
     python main.py run --image face.jpg --skip-3d --glb ./output/avatar.glb
-
-    # 랜드마크 디버깅 시각화
     python main.py debug --image face.jpg
+    python main.py batch --images samples --save-json output/batch.json
+
+API Key Configuration:
+    Set VARCO_API_KEY or MESHY_API_KEY environment variable,
+    or create a .env file in the project root:
+        VARCO_API_KEY=your_varco_key
+        MESHY_API_KEY=your_meshy_key
 """
 
 import argparse
+import csv
 import json
+import os
 import sys
+from pathlib import Path
 
-from pipeline import run_pipeline, extract_features, visualize_landmarks, FaceFeatureVector
+from dotenv import load_dotenv
+
+from pipeline import (
+    FaceFeatureVector,
+    extract_features,
+    run_pipeline,
+    visualize_landmarks,
+)
+
+
+ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def cmd_run(args):
+    image_path = _resolve_image_arg(args.image)
     result = run_pipeline(
-        image_path=args.image,
+        image_path=image_path,
         output_dir=args.output,
         provider=args.provider,
         api_key=args.api_key,
         skip_3d=args.skip_3d,
         existing_glb=args.glb,
     )
-    print("\n[완료] Pipeline result:")
+    status = result.get("status", "ok")
+    if status == "ok":
+        print("\n[Done] Pipeline result:")
+    else:
+        print(f"\n[Failed] Pipeline result: status={status}")
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    if status != "ok":
+        sys.exit(1)
 
 
 def cmd_extract(args):
-    """API 키 없이 특징 추출만 테스트."""
-    print(f"[Extract] 이미지: {args.image}")
-    fv = extract_features(args.image)
-    if fv is None:
-        print("[Extract] 얼굴을 감지하지 못했습니다.")
+    image_path = _resolve_image_arg(args.image)
+    print(f"[Extract] image: {image_path}")
+    feature_vector = extract_features(image_path)
+    if feature_vector is None:
+        print("[Extract] face not detected")
         sys.exit(1)
 
-    print("[Extract] 특징 벡터:")
-    for k, v in fv.to_dict().items():
-        print(f"  {k}: {v:.4f}")
+    print("[Extract] feature vector:")
+    for key, value in feature_vector.to_dict().items():
+        if value is None:
+            print(f"  {key}: null")
+        else:
+            print(f"  {key}: {value:.4f}")
 
     from pipeline import select_template
-    result = select_template(fv)
-    print(f"\n[Select] 템플릿: {result.template_name}  (confidence={result.confidence:.3f})")
-    print(f"[Select] 전체 점수: {result.all_scores}")
-    print(f"[Select] 슬라이더 초기값:")
-    for k, v in result.slider_init.items():
-        print(f"  {k}: {v:.3f}")
+
+    result = select_template(feature_vector)
+    print(f"\n[Select] {result.template_name} (confidence={result.confidence:.3f})")
+    print(f"[Select] all scores: {result.all_scores}")
+    print("[Select] slider init:")
+    for key, value in result.slider_init.items():
+        print(f"  {key}: {value:.3f}")
 
 
 def cmd_debug(args):
-    """랜드마크 시각화 이미지를 저장한다."""
-    from pathlib import Path
+    image_path = _resolve_image_arg(args.image)
     save_path = str(Path(args.output) / "landmarks_debug.png")
     Path(args.output).mkdir(parents=True, exist_ok=True)
-    img = visualize_landmarks(args.image, save_path=save_path)
-    print(f"[Debug] 랜드마크 시각화 저장됨: {save_path}")
-    return img
+    image = visualize_landmarks(image_path, save_path=save_path)
+    print(f"[Debug] landmark visualization saved: {save_path}")
+    return image
 
 
 def cmd_batch_run(args):
-    """여러 이미지를 순서대로 전체 파이프라인 실행 (VARCO 포함)."""
-    from pathlib import Path
-
-    images = args.images
+    images = _resolve_image_args(args.images)
     results = []
 
-    for img_path in images:
-        name = Path(img_path).stem
+    for image_path in images:
+        name = Path(image_path).stem
         out_dir = str(Path(args.output) / name)
-        print(f"\n[BatchRun] ▶ {img_path} → {out_dir}")
+        print(f"\n[BatchRun] {image_path} -> {out_dir}")
         try:
             result = run_pipeline(
-                image_path=img_path,
+                image_path=image_path,
                 output_dir=out_dir,
                 provider=args.provider,
                 api_key=args.api_key,
             )
-            results.append({"image": img_path, "status": "ok", **result})
-            print(f"[BatchRun] ✅ {img_path} → template={result['template']}")
-        except Exception as e:
-            results.append({"image": img_path, "status": "failed", "error": str(e)})
-            print(f"[BatchRun] ❌ {img_path} → {e}")
+            status = result.get("status", "ok")
+            batch_row = {"image": image_path, **result}
+            results.append(batch_row)
 
-    print(f"\n[BatchRun] 완료: {len([r for r in results if r['status']=='ok'])}/{len(images)} 성공")
+            if status == "ok":
+                print(f"[BatchRun] {image_path} -> template={result['template']}")
+            else:
+                print(
+                    f"[BatchRun] {image_path} -> {status}: "
+                    f"{result.get('error', '')}"
+                )
+        except Exception as exc:
+            results.append({"image": image_path, "status": "failed", "error": str(exc)})
+            print(f"[BatchRun] {image_path} -> {exc}")
+
+    succeeded = len([row for row in results if row["status"] == "ok"])
+    print(f"\n[BatchRun] done: {succeeded}/{len(images)} succeeded")
 
 
 def cmd_batch(args):
-    """여러 이미지를 한번에 특징 추출하고 비교 테이블로 출력한다."""
-    from pathlib import Path
     from pipeline import select_template
 
-    images = args.images
+    images = _resolve_image_args(args.images)
     rows = []
 
-    for img_path in images:
-        name = Path(img_path).name
-        fv = extract_features(img_path)
-        if fv is None:
-            print(f"[Batch] ❌ {name} — 얼굴 미검출")
-            rows.append({"name": name, "failed": True})
-            continue
+    for image_path in images:
+        image_name = Path(image_path).name
+        row = {
+            "image_path": image_path,
+            "image_name": image_name,
+            "status": "ok",
+            "feature_vector": None,
+            "template": None,
+            "confidence": None,
+            "all_scores": None,
+            "slider_init": None,
+            "error": None,
+        }
 
-        result = select_template(fv)
-        row = {"name": name, "template": result.template_name, **fv.to_dict()}
+        try:
+            feature_vector = extract_features(image_path)
+            if feature_vector is None:
+                row["status"] = "failed"
+                row["error"] = "face not detected"
+                print(f"[Batch] {image_name} -> face not detected")
+                rows.append(row)
+                continue
+
+            result = select_template(feature_vector)
+            row["feature_vector"] = feature_vector.to_dict()
+            row["template"] = result.template_name
+            row["confidence"] = result.confidence
+            row["all_scores"] = result.all_scores
+            row["slider_init"] = result.slider_init
+            print(
+                f"[Batch] {image_name} -> {result.template_name} "
+                f"(confidence={result.confidence:.3f})"
+            )
+        except Exception as exc:
+            row["status"] = "failed"
+            row["error"] = str(exc)
+            print(f"[Batch] {image_name} -> {exc}")
+
         rows.append(row)
-        print(f"[Batch] ✅ {name} → {result.template_name} (confidence={result.confidence:.3f})")
 
-    # 비교 테이블 출력
+    _print_batch_table(rows)
+
+    if args.save_json:
+        _save_batch_json(rows, args.save_json)
+
+    if args.save_csv:
+        _save_batch_csv(rows, args.save_csv)
+
+
+def _print_batch_table(rows):
     if not rows:
         return
 
-    succeeded = [r for r in rows if not r.get("failed")]
+    succeeded = [row for row in rows if row["status"] == "ok" and row["feature_vector"]]
     if not succeeded:
         return
 
     fields = list(FaceFeatureVector.field_names())
-    col_w = 22
+    col_width = 22
+    header = (
+        f"{'image':<20} {'template':<8} "
+        + " ".join(f"{field[:col_width]:<{col_width}}" for field in fields)
+    )
 
-    header = f"{'이미지':<20} {'템플릿':<8} " + " ".join(f"{f[:col_w]:<{col_w}}" for f in fields)
     print("\n" + "=" * len(header))
     print(header)
     print("=" * len(header))
-    for r in succeeded:
-        vals = " ".join(f"{r[f]:<{col_w}.4f}" for f in fields)
-        print(f"{r['name']:<20} {r['template']:<8} {vals}")
+    for row in succeeded:
+        feature_vector = row["feature_vector"]
+        values = " ".join(
+            f"{feature_vector[field]:<{col_width}.4f}" for field in fields
+        )
+        print(f"{row['image_name']:<20} {row['template']:<8} {values}")
     print("=" * len(header))
 
 
+def _save_batch_json(rows, save_path):
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[Batch] JSON saved: {path}")
+
+
+def _save_batch_csv(rows, save_path):
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    feature_fields = list(FaceFeatureVector.field_names())
+    slider_fields = sorted({
+        key
+        for row in rows
+        for key in (row["slider_init"] or {}).keys()
+    })
+
+    slider_columns = [f"slider_{key}" for key in slider_fields]
+    fieldnames = [
+        "image_path",
+        "image_name",
+        "status",
+        "template",
+        "confidence",
+        "error",
+        *feature_fields,
+        *slider_columns,
+    ]
+
+    with path.open("w", newline="", encoding="utf-8-sig") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            feature_vector = row["feature_vector"] or {}
+            slider_init = row["slider_init"] or {}
+            writer.writerow(
+                {
+                    "image_path": row["image_path"],
+                    "image_name": row["image_name"],
+                    "status": row["status"],
+                    "template": row["template"] or "",
+                    "confidence": (
+                        ""
+                        if row["confidence"] is None
+                        else f"{row['confidence']:.6f}"
+                    ),
+                    "error": row["error"] or "",
+                    **{field: feature_vector.get(field, "") for field in feature_fields},
+                    **{
+                        f"slider_{field}": slider_init.get(field, "")
+                        for field in slider_fields
+                    },
+                }
+            )
+
+    print(f"[Batch] CSV saved: {path}")
+
+
+def _resolve_image_arg(image_arg: str) -> str:
+    path = Path(image_arg)
+    if path.is_file():
+        _validate_image_suffix(path)
+        return str(path)
+    legacy_sample_path = _resolve_legacy_sample_image(path)
+    if legacy_sample_path is not None:
+        return str(legacy_sample_path)
+    if path.is_dir():
+        matches = _find_original_images(path)
+        if len(matches) == 1:
+            return str(matches[0])
+        if not matches:
+            raise FileNotFoundError(
+                f"No supported *_original image found in directory: {path}"
+            )
+        raise ValueError(
+            f"Multiple supported *_original images found in directory: {path}"
+        )
+    raise FileNotFoundError(f"Image path not found: {path}")
+
+
+def _resolve_legacy_sample_image(path: Path) -> Path | None:
+    if path.parent.name != "samples" or path.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES:
+        return None
+
+    stem = path.stem
+    if "_" not in stem:
+        return None
+
+    prefix, _ = stem.split("_", 1)
+    sample_dir = path.parent / f"{prefix}_input"
+    candidate = sample_dir / path.name
+    if candidate.is_file():
+        _validate_image_suffix(candidate)
+        return candidate
+    return None
+
+
+def _find_original_images(path: Path) -> list[Path]:
+    return sorted(
+        child for child in path.iterdir()
+        if child.is_file()
+        and child.suffix.lower() in ALLOWED_IMAGE_SUFFIXES
+        and child.stem.endswith("_original")
+    )
+
+
+def _validate_image_suffix(path: Path) -> None:
+    if path.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES:
+        allowed = ", ".join(sorted(ALLOWED_IMAGE_SUFFIXES))
+        raise ValueError(f"Unsupported image extension: {path.suffix}. Allowed: {allowed}")
+
+
+def _resolve_image_args(image_args: list[str]) -> list[str]:
+    resolved: list[str] = []
+
+    for image_arg in image_args:
+        path = Path(image_arg)
+        if path.is_dir():
+            sample_dirs = sorted(
+                child for child in path.iterdir()
+                if child.is_dir() and child.name.endswith("_input")
+            )
+            if sample_dirs:
+                for sample_dir in sample_dirs:
+                    resolved.append(_resolve_image_arg(str(sample_dir)))
+                continue
+        resolved.append(_resolve_image_arg(image_arg))
+
+    return resolved
+
+
 def main():
+    # Load environment variables from .env file
+    load_dotenv()
+    
     parser = argparse.ArgumentParser(description="Virtual Avatar Pipeline")
-    parser.add_argument("--output", default="./output", help="결과 저장 디렉토리")
+    parser.add_argument("--output", default="./output", help="output directory")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # run
-    p_run = sub.add_parser("run", help="전체 파이프라인 실행 (Stage 2-6)")
-    p_run.add_argument("--image", required=True)
+    p_run = sub.add_parser("run", help="run the full pipeline")
+    p_run.add_argument("--image", required=True, help="image path or sample input directory")
     p_run.add_argument("--provider", default="varco", choices=["meshy", "varco"])
     p_run.add_argument("--api-key", default="", dest="api_key")
     p_run.add_argument("--skip-3d", action="store_true", dest="skip_3d")
     p_run.add_argument("--glb", default=None)
 
-    # extract
-    p_ext = sub.add_parser("extract", help="특징 추출만 (API 불필요)")
-    p_ext.add_argument("--image", required=True)
+    p_ext = sub.add_parser("extract", help="extract face features only")
+    p_ext.add_argument("--image", required=True, help="image path or sample input directory")
 
-    # batch-run
-    p_brun = sub.add_parser("batch-run", help="여러 이미지 전체 파이프라인 실행 (VARCO 포함)")
-    p_brun.add_argument("--images", nargs="+", required=True)
+    p_brun = sub.add_parser("batch-run", help="run the full pipeline for many images")
+    p_brun.add_argument("--images", nargs="+", required=True, help="image paths, sample input directories, or samples root")
     p_brun.add_argument("--provider", default="varco", choices=["meshy", "varco"])
     p_brun.add_argument("--api-key", default="", dest="api_key")
 
-    # batch
-    p_bat = sub.add_parser("batch", help="여러 이미지 한번에 특징 추출 + 비교 (API 불필요)")
-    p_bat.add_argument("--images", nargs="+", required=True, help="이미지 경로들 (스페이스로 구분)")
+    p_bat = sub.add_parser("batch", help="extract and compare features for many images")
+    p_bat.add_argument("--images", nargs="+", required=True, help="image paths, sample input directories, or samples root")
+    p_bat.add_argument("--save-json", dest="save_json", default=None)
+    p_bat.add_argument("--save-csv", dest="save_csv", default=None)
 
-    # debug
-    p_dbg = sub.add_parser("debug", help="랜드마크 시각화")
-    p_dbg.add_argument("--image", required=True)
+    p_dbg = sub.add_parser("debug", help="visualize landmarks")
+    p_dbg.add_argument("--image", required=True, help="image path or sample input directory")
 
     args = parser.parse_args()
+    
+    # Resolve API key: CLI arg > environment variable
+    if hasattr(args, "api_key"):
+        api_key = args.api_key or os.getenv("VARCO_API_KEY") or os.getenv("MESHY_API_KEY") or ""
+        args.api_key = api_key
 
     if args.command == "run":
         cmd_run(args)
